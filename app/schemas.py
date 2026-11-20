@@ -83,6 +83,9 @@ class WitnessOut(BaseModel):
     kind: str
     record_id: int
     detail: str
+    sources: Optional[list[dict]] = Field(
+        None, description="叠压见证的全部出处（手工记录号或野外簿页行号）"
+    )
 
 
 class ContradictionOut(BaseModel):
@@ -95,6 +98,9 @@ class GroupEdgeOut(BaseModel):
     from_group: int
     to_group: int
     edge_ids: list[int]
+    sources: Optional[list[dict]] = Field(
+        None, description="该叠压边的全部出处（手工记录号 / 野外簿页行号）"
+    )
 
 
 class GroupOut(BaseModel):
@@ -124,3 +130,63 @@ class WriteResult(BaseModel):
 
     record: dict
     solution: SolutionOut
+
+
+# ---------- 野外簿 ----------
+
+class NotebookLayerIn(BaseModel):
+    label: str = Field(
+        ..., min_length=1, max_length=60, description="簿内层号（只在本书内有效）"
+    )
+    stratum_id: int = Field(..., description="对照到的现有层位 id")
+
+
+class NotebookSuperpositionIn(BaseModel):
+    lower_label: str = Field(..., min_length=1, max_length=60, description="下层层号")
+    upper_label: str = Field(..., min_length=1, max_length=60, description="上层层号")
+    page: Optional[int] = Field(None, ge=1, description="记录所在页码")
+    line: Optional[int] = Field(None, ge=1, description="记录所在行号")
+
+
+class NotebookSubmit(BaseModel):
+    """按簿号整本提交：簿号 + 本簿层号对照 + 带页行号的上下层记录。"""
+
+    notebook_no: str = Field(
+        ..., min_length=1, max_length=60, description="簿号（遗址内唯一）"
+    )
+    layers: list[NotebookLayerIn] = Field(
+        default_factory=list, description="本簿层号 -> 现有层位 id 的对照"
+    )
+    superpositions: list[NotebookSuperpositionIn] = Field(
+        default_factory=list, description="本簿的下层 -> 上层记录（簿内层号）"
+    )
+
+    @field_validator("layers")
+    @classmethod
+    def _unique_labels(cls, value: list[NotebookLayerIn]) -> list[NotebookLayerIn]:
+        seen: set[str] = set()
+        for item in value:
+            if item.label in seen:
+                raise ValueError(f"簿内层号 {item.label!r} 重复")
+            seen.add(item.label)
+        return value
+
+
+class NotebookIssueOut(BaseModel):
+    kind: str
+    notebook_no: str
+    page: Optional[int]
+    line: Optional[int]
+    lower_label: Optional[str]
+    upper_label: Optional[str]
+    message: str
+
+
+class NotebookOut(BaseModel):
+    id: int
+    site_id: int
+    notebook_no: str
+    created: str
+    updated: str
+    layers: list[dict]
+    superpositions: list[dict]

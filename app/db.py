@@ -61,10 +61,46 @@ CREATE TABLE IF NOT EXISTS superpositions (
     UNIQUE (site_id, lower_id, upper_id)
 );
 
+-- 野外簿：簿号只在遗址内唯一；簿内层号只在簿内有效。
+CREATE TABLE IF NOT EXISTS notebooks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id     INTEGER NOT NULL REFERENCES sites(id),
+    notebook_no TEXT NOT NULL,
+    created     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (site_id, notebook_no)
+);
+
+-- 簿内层号 -> 现有层位 id 的对照。
+CREATE TABLE IF NOT EXISTS notebook_layers (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    notebook_id INTEGER NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+    label       TEXT NOT NULL,
+    stratum_id  INTEGER NOT NULL REFERENCES strata(id),
+    UNIQUE (notebook_id, label)
+);
+
+-- 野外簿中带页行号的“下层 -> 上层”记录。提交时按当次对照解析并固化，
+-- 之后替换簿会整本重写这些解析结果。
+CREATE TABLE IF NOT EXISTS notebook_superpositions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    notebook_id INTEGER NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+    lower_label TEXT NOT NULL,
+    upper_label TEXT NOT NULL,
+    lower_id    INTEGER NOT NULL REFERENCES strata(id),
+    upper_id    INTEGER NOT NULL REFERENCES strata(id),
+    page        INTEGER,
+    line        INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_strata_site ON strata(site_id);
 CREATE INDEX IF NOT EXISTS idx_intervals_stratum ON stratum_intervals(stratum_id);
 CREATE INDEX IF NOT EXISTS idx_corr_site ON correlations(site_id);
 CREATE INDEX IF NOT EXISTS idx_sup_site ON superpositions(site_id);
+CREATE INDEX IF NOT EXISTS idx_notebook_site ON notebooks(site_id);
+CREATE INDEX IF NOT EXISTS idx_notebook_layers_nb ON notebook_layers(notebook_id);
+CREATE INDEX IF NOT EXISTS idx_notebook_sup_nb ON notebook_superpositions(notebook_id);
+CREATE INDEX IF NOT EXISTS idx_notebook_sup_pair ON notebook_superpositions(lower_id, upper_id);
 """
 
 
@@ -286,3 +322,134 @@ def list_superpositions(
 
 def delete_superposition(conn: sqlite3.Connection, superposition_id: int) -> None:
     conn.execute("DELETE FROM superpositions WHERE id = ?", (superposition_id,))
+
+
+# ---------- 野外簿 ----------
+
+def get_notebook(
+    conn: sqlite3.Connection, site_id: int, notebook_no: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM notebooks WHERE site_id = ? AND notebook_no = ?",
+        (site_id, notebook_no),
+    ).fetchone()
+
+
+def get_notebook_by_id(
+    conn: sqlite3.Connection, notebook_id: int
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM notebooks WHERE id = ?", (notebook_id,)
+    ).fetchone()
+
+
+def list_notebooks(conn: sqlite3.Connection, site_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM notebooks WHERE site_id = ? ORDER BY notebook_no, id",
+        (site_id,),
+    ).fetchall()
+
+
+def upsert_notebook(
+    conn: sqlite3.Connection, site_id: int, notebook_no: str
+) -> sqlite3.Row:
+    """按簿号取簿；不存在则新建。已存在时更新提交时间并清空旧内容。"""
+    row = get_notebook(conn, site_id, notebook_no)
+    if row is None:
+        cur = conn.execute(
+            "INSERT INTO notebooks(site_id, notebook_no) VALUES (?, ?)",
+            (site_id, notebook_no),
+        )
+        return get_notebook_by_id(conn, cur.lastrowid)
+    conn.execute(
+        "UPDATE notebooks SET updated = datetime('now') WHERE id = ?", (row["id"],)
+    )
+    clear_notebook_contents(conn, row["id"])
+    return get_notebook_by_id(conn, row["id"])
+
+
+def clear_notebook_contents(conn: sqlite3.Connection, notebook_id: int) -> None:
+    """整本替换前清空旧对照与旧记录；簿本身（簿号、建档时间）保留。"""
+    conn.execute(
+        "DELETE FROM notebook_superpositions WHERE notebook_id = ?", (notebook_id,)
+    )
+    conn.execute("DELETE FROM notebook_layers WHERE notebook_id = ?", (notebook_id,))
+
+
+def delete_notebook(conn: sqlite3.Connection, notebook_id: int) -> None:
+    conn.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
+
+
+def add_notebook_layer(
+    conn: sqlite3.Connection, notebook_id: int, label: str, stratum_id: int
+) -> sqlite3.Row:
+    cur = conn.execute(
+        "INSERT INTO notebook_layers(notebook_id, label, stratum_id) VALUES (?, ?, ?)",
+        (notebook_id, label, stratum_id),
+    )
+    return conn.execute(
+        "SELECT * FROM notebook_layers WHERE id = ?", (cur.lastrowid,)
+    ).fetchone()
+
+
+def add_notebook_superposition(
+    conn: sqlite3.Connection,
+    notebook_id: int,
+    lower_label: str,
+    upper_label: str,
+    lower_id: int,
+    upper_id: int,
+    page: Optional[int],
+    line: Optional[int],
+) -> sqlite3.Row:
+    cur = conn.execute(
+        "INSERT INTO notebook_superpositions"
+        "(notebook_id, lower_label, upper_label, lower_id, upper_id, page, line) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            notebook_id,
+            lower_label,
+            upper_label,
+            lower_id,
+            upper_id,
+            page,
+            line,
+        ),
+    )
+    return conn.execute(
+        "SELECT * FROM notebook_superpositions WHERE id = ?", (cur.lastrowid,)
+    ).fetchone()
+
+
+def list_notebook_layers(
+    conn: sqlite3.Connection, notebook_id: int
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM notebook_layers WHERE notebook_id = ? ORDER BY id",
+        (notebook_id,),
+    ).fetchall()
+
+
+def list_notebook_superpositions(
+    conn: sqlite3.Connection, notebook_id: int
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM notebook_superpositions WHERE notebook_id = ? "
+        "ORDER BY COALESCE(page, 0), COALESCE(line, 0), id",
+        (notebook_id,),
+    ).fetchall()
+
+
+def list_site_notebook_superpositions(
+    conn: sqlite3.Connection, site_id: int
+) -> list[sqlite3.Row]:
+    """整站所有野外簿记录（带簿号），用于求解装配与出处查询。"""
+    return conn.execute(
+        "SELECT ns.*, n.notebook_no "
+        "FROM notebook_superpositions ns "
+        "JOIN notebooks n ON n.id = ns.notebook_id "
+        "WHERE n.site_id = ? "
+        "ORDER BY n.notebook_no, COALESCE(ns.page, 0), "
+        "COALESCE(ns.line, 0), ns.id",
+        (site_id,),
+    ).fetchall()
